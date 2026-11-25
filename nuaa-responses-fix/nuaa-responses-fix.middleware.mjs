@@ -1,7 +1,11 @@
 // Magpie in-process middleware. No network, credentials, subprocess or listener.
+//
+// Scope: every provider and every model, as long as the request speaks the
+// Responses protocol. The bug this fixes is a protocol artifact - an upstream
+// closing a stream in a way that makes magpie append "no terminal event" after a
+// perfectly good response.completed - so it is not tied to one vendor or model.
 export function onProvider(body, ctx) {
-  ctx.state.active = ctx.protocol === 'responses' && ctx.provider.id === 'nuaa'
-    && ctx.provider.model === 'deepseek-flash';
+  ctx.state.active = ctx.protocol === 'responses';
   ctx.state.completed = false;
   ctx.state.failed = false;
 }
