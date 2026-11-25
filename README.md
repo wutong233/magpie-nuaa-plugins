@@ -18,7 +18,7 @@
 
 **解决了什么问题现象**：`response.completed` 已经正常到达，上游关闭连接后 magpie 又补了一条 `responses.incomplete_stream`（`Upstream stream ended without a terminal Responses event`），客户端于是把一次已成功的回答当成失败。
 
-**做法**：在完整收到一条合法的 `response.completed` 之后，丢弃那条特定的错误事件。判定条件是 Responses 协议、provider `nuaa`、模型 `deepseek-flash`、`response.id` 非空且 `output` 为数组、本轮未出现其它失败事件。
+**做法**：在完整收到一条合法的 `response.completed` 之后，丢弃那条特定的错误事件。判定条件是 Responses 协议、`response.id` 非空且 `output` 为数组、本轮未出现其它失败事件。对**所有供应商、所有模型**生效，不限定 NUAA。
 
 **边界**：任一条件不满足即放行，不掩盖真实错误。条件与已知限制见 [nuaa-responses-fix/README.md](nuaa-responses-fix/README.md)。
 
@@ -61,10 +61,10 @@ magpie plugin rm  <路径>
 
 ## 适用范围
 
-两个插件都是针对同一套上游的定向修复。上游没有这两个问题时，启用也不会影响其它流量：
+两个插件都不会干扰无关流量。`waf-shim` 无命中即不改动请求；`nuaa-responses-fix` 只在 Responses 协议的流上按精确条件判定：
 
 - `waf-shim` 无命中即返回 `undefined`，请求不做任何修改；
-- `nuaa-responses-fix` 的作用范围限定为 `responses` 协议 + provider `nuaa` + 模型 `deepseek-flash`，其它流量不经过它的判定。
+- `nuaa-responses-fix` 只处理 Responses 协议，对所有供应商与模型生效；Chat Completions 等其它协议完全不经过它的判定。
 
 两处范围都可以在各自的 README 里调整。
 
