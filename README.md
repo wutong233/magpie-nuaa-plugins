@@ -1,53 +1,33 @@
 # magpie-nuaa-plugins
 
-两个写给 [magpie](https://magpie.im) 网关的小插件，修同一套上游（`token.nuaa.edu.cn`）的两个小毛病。
+两个 [magpie](https://magpie.im) 网关插件，修同一套上游（`token.nuaa.edu.cn`）的两个独立问题：一个在请求侧，被安全网关误拦；一个在响应侧，正常收尾后多报一条错误。
 
-## 用大白话说
+两者挂载在请求/响应的不同阶段，不共享状态，可以同时启用。
 
-### 插件一：waf-shim —— 让被「安检」扣下的请求能过去
+## waf-shim
 
-上游门口有一道安检，会把对话里的某个词当成危险品。只要对话里出现过一次，之后**每一次**带着它的请求都会被整张退回，只返回一张写着「访问禁止」的网页。于是这个会话就废了，只能新开一个。
+**问题**：上游的安全网关把 Python traceback 里的 `<module>` 判定为攻击特征，返回 HTTP 200 + `text/html` 的「访问禁止」页面。magpie 期待 JSON，拿到 HTML 就报 `answered 200 OK with a web page`。traceback 会留在对话历史里，因此一个会话只要出现过一次，之后每轮请求都会重发它，该会话持续报错。
 
-更麻烦的是，那个词是 Python 报错时自动生成的。只要你用代码工具跑过脚本、脚本报过一次错，它就会永久躺在对话历史里，之后每轮请求都把它重新发出去。
+**做法**：在请求发出前把匹配的文本替换成不会被拦的等价写法（`<module>` → `<module_>`），同时在会话里插入一条 system 说明，声明改了什么、原词是什么、改写是等价且无损的。
 
-这个插件干的事很朴素：**在请求递到安检之前，把那个词换成一个安检不管的写法**，相当于给它"描了个边"。同时在对话里贴一张便条，告诉模型：
+**边界**：没有命中时返回 `undefined`，请求原样发出；只处理对话文本字段，`model`、`tools`、`stream` 等原样透传；出现异常同样返回 `undefined`，不会让请求失败。
 
-> 这个词我改过了。改后的写法跟原文完全等价，原文是"被尖括号包住的 module"。
+规则集中在一处 `DEFAULT_RULES`，增加被误拦的内容只需追加一条，详见 [waf-shim/README.md](waf-shim/README.md)。
 
-这样安检放行，模型也不会把改过的写法当成你真的写了那样。
+## nuaa-responses-fix
 
-### 插件二：nuaa-responses-fix —— 让「已经收完的货」不被报成丢件
+**问题**：`response.completed` 已经正常到达，上游关闭连接后 magpie 又补了一条 `responses.incomplete_stream`（`Upstream stream ended without a terminal Responses event`），客户端于是把一次已成功的回答当成失败。
 
-回答明明已经完整显示在屏幕上了，末尾却冒一条错误：「上游的流没有正常结束」。客户端于是把它当成失败，弹重试。
+**做法**：在完整收到一条合法的 `response.completed` 之后，丢弃那条特定的错误事件。判定条件是 Responses 协议、provider `nuaa`、模型 `deepseek-flash`、`response.id` 非空且 `output` 为数组、本轮未出现其它失败事件。
 
-实际上终止信号是收到了的——只是上游关连接的方式让网关多疑，又补发了一条「我没收到终止信号」。
+**边界**：任一条件不满足即放行，不掩盖真实错误。条件与已知限制见 [nuaa-responses-fix/README.md](nuaa-responses-fix/README.md)。
 
-这个插件干的事也很朴素：**在确认"东西确实已经完整到手"之后，把这条假警报拦下来**。
+## 一览
 
-判断写得很严，四个条件全满足才拦：
-
-1. 是 Responses 协议；
-2. provider 是 `nuaa`；
-3. 完整收到过一条合法的「已完成」事件（有 id、有 output）；
-4. 这一轮从头到尾没出过错。
-
-只要有一条不满足就原样放行——宁可不修，也不盖住真正的错误。
-
-## 一句话版本
-
-| 插件 | 一句话 | 好比 |
-|---|---|---|
-| `waf-shim` | 请求发出前，把会被误拦的词换成等价写法，并告诉模型改了什么 | 过安检前把会被扣的东西换个合规包装，再贴张说明 |
-| `nuaa-responses-fix` | 响应已经完整收到后，吞掉上游补发的假「流中断」错误 | 快递已签收，把系统误弹的「配送失败」提示划掉 |
-
-两者是配套的：一个管**请求出去**，一个管**响应回来**，不共享状态，可以同时开启。
-
-## 目录
-
-| 目录 | 插件类型 | 挂载点 | 做什么 |
+| 插件 | 类型 | 挂载点 | 处理的问题 |
 |---|---|---|---|
-| [`waf-shim/`](waf-shim/) | async gateway hook | `onRequest` | 请求发出前改写被误拦的字面量，并插入一条说明告诉模型改了什么 |
-| [`nuaa-responses-fix/`](nuaa-responses-fix/) | gateway middleware | `onProvider` / `onEvent` | 在响应已正常收尾之后，吞掉上游多补的那条「流中断」错误 |
+| [`waf-shim`](waf-shim/) | async gateway hook | `onRequest` | 改写被安全网关误拦的字面量，并向模型说明改写内容 |
+| [`nuaa-responses-fix`](nuaa-responses-fix/) | gateway middleware | `onProvider` / `onEvent` | 在响应已正常收尾后，丢弃上游补发的错误事件 |
 
 ## 安装
 
@@ -79,14 +59,14 @@ magpie plugin on  <路径>
 magpie plugin rm  <路径>
 ```
 
-## 这是给谁用的
+## 适用范围
 
-给**同一个上游**打交道的 magpie 用户。如果你的上游没有这两个毛病，装上也不会有副作用：
+两个插件都是针对同一套上游的定向修复。上游没有这两个问题时，启用也不会影响其它流量：
 
-- `waf-shim` 在没有命中时返回 `undefined`，请求原封不动；
-- `nuaa-responses-fix` 的作用范围写死为 `responses` 协议 + provider `nuaa` + 模型 `deepseek-flash`，其它流量完全不经过它。
+- `waf-shim` 无命中即返回 `undefined`，请求不做任何修改；
+- `nuaa-responses-fix` 的作用范围限定为 `responses` 协议 + provider `nuaa` + 模型 `deepseek-flash`，其它流量不经过它的判定。
 
-两处范围都可以在各自 README 里改。
+两处范围都可以在各自的 README 里调整。
 
 ## 离线自测
 
@@ -97,14 +77,14 @@ node waf-shim/waf-shim.test.mjs
 node nuaa-responses-fix/nuaa-responses-fix.test.mjs
 ```
 
-输出 `FAILED 0` 即通过。改插件之前先跑一遍，改完再跑一遍。
+输出 `FAILED 0` 即通过。修改插件前先跑一遍，改完再跑一遍。
 
-## 限制与免责
+## 限制
 
-- 都是**针对性补丁**：规则和条件是照着实测的失败现象定的，不是通用方案。上游行为一变就可能失效。
-- `waf-shim` 的改写是**传输层的**，会话记录、UI 显示、模型理解都以它插入的那条说明为准。
-- 没有任何遥测、网络请求或凭据读写；两个插件都只在内存里处理已有的请求/响应对象。
-- 不保证适用于你的 DNS、代理、账号或上游版本。
+- 都是**定向补丁**：规则与条件依据实测的失败现象确定，不是通用方案，上游行为改变后可能失效。
+- `waf-shim` 的改写发生在传输层；会话记录、界面显示与模型理解以它插入的说明为准。
+- 不含遥测、外部请求或凭据读写，两个插件都只在内存中处理已有的请求/响应对象。
+- 未验证是否适用于其它 DNS、代理、账号或上游版本。
 
 ## License
 
