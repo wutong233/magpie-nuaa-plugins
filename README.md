@@ -6,7 +6,7 @@
 
 ## waf-shim
 
-**解决了什么问题现象**：上游的安全网关把 Python traceback 里的 `<module>` 判定为攻击特征，返回 HTTP 200 + `text/html` 的「访问禁止」页面。magpie 期待 JSON，拿到 HTML 就报 `answered 200 OK with a web page`。traceback 会留在对话历史里，因此一个会话只要出现过一次，之后每轮请求都会重发它，该会话持续报错。
+**解决了什么**：上游的安全网关把 Python traceback 里的 `<module>` 判定为攻击特征，返回「访问禁止」页面。一个会话只要出现过一次，之后每轮请求都会重发它，该会话持续报错。
 
 **做法**：在请求发出前把匹配的文本替换成不会被拦的等价写法（`<module>` → `<module_>`），同时在会话里插入一条 system 说明，声明改了什么、原词是什么、改写是等价且无损的。
 
@@ -16,9 +16,9 @@
 
 ## nuaa-responses-fix
 
-**解决了什么问题现象**：`response.completed` 已经正常到达，上游关闭连接后 magpie 又补了一条 `responses.incomplete_stream`（`Upstream stream ended without a terminal Responses event`），客户端于是把一次已成功的回答当成失败。
+**解决了什么**：`response.completed` 已经正常到达，上游关闭连接后 magpie 又补了一条 `responses.incomplete_stream`，客户端把已成功的回答当成失败。
 
-**做法**：在完整收到一条合法的 `response.completed` 之后，丢弃那条特定的错误事件。判定条件是 Responses 协议、`response.id` 非空且 `output` 为数组、本轮未出现其它失败事件。对**所有供应商、所有模型**生效，不限定 NUAA。
+**做法**：在完整收到一条合法的 `response.completed` 之后，丢弃那条特定的错误事件。判定条件是 Responses 协议、`response.id` 非空且 `output` 为数组、本轮未出现其它失败事件；对所有供应商、所有模型生效，不限定 NUAA。
 
 **边界**：任一条件不满足即放行，不掩盖真实错误。条件与已知限制见 [nuaa-responses-fix/README.md](nuaa-responses-fix/README.md)。
 
@@ -61,7 +61,7 @@ magpie plugin rm  <路径>
 
 ## 适用范围
 
-两个插件都不会干扰无关流量。`waf-shim` 无命中即不改动请求；`nuaa-responses-fix` 只在 Responses 协议的流上按精确条件判定：
+两个插件都是定点修复，不干扰无关流量：
 
 - `waf-shim` 无命中即返回 `undefined`，请求不做任何修改；
 - `nuaa-responses-fix` 只处理 Responses 协议，对所有供应商与模型生效；Chat Completions 等其它协议完全不经过它的判定。
