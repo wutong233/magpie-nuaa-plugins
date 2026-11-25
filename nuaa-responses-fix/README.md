@@ -2,12 +2,16 @@
 
 magpie 网关中间件（gateway middleware，进程内）。在 Responses 流**已经正常收尾**之后，吞掉上游多出来的一条「流中断」错误，避免客户端把一次成功的回答当成失败。
 
-## 问题
+对**所有供应商、所有模型**生效，不限定 NUAA。
+
+---
+
+## 解决了什么问题现象
 
 回答其实已经完整显示出来了，但会话末尾仍报错：
 
 ```
-server_error: NUAA: Upstream stream ended without a terminal Responses event
+server_error: Upstream stream ended without a terminal Responses event
         (responses.incomplete_stream)
 ```
 
@@ -17,29 +21,28 @@ server_error: NUAA: Upstream stream ended without a terminal Responses event
 
 Responses 协议的正常收尾是最后一条 `response.completed`（`status` 为 `completed`，带完整 `output`）。
 
-magpie 在这个状态之后仍会等连接安静下来。这条链路上，有时 `response.completed` 之后还会再冒出一条
+magpie 在这个状态之后仍会等连接安静下来。有些上游关闭连接的方式会让 magpie 判断失误，于是在 `response.completed` 之后又补一条
 
 ```json
 {"type":"error","error":{"code":"responses.incomplete_stream",
  "message":"Upstream stream ended without a terminal Responses event"}}
 ```
 
-也就是说：**终止事件其实收到了**，但上游的连接关闭方式让 magpie 又补了一条「我没收到终止事件」。这条错误既不符合事实，也会覆盖掉已经成功的回答。
+也就是说：**终止事件其实收到了**，但这条例外的错误既不符合事实，也会覆盖掉已经成功的回答。
 
 ## 它做什么
 
 ### `onProvider(body, ctx)` —— 请求开始时
 
-判断是否在管辖范围内，把三个状态位挂到 `ctx.state`：
+只看协议，不看供应商和模型：
 
 ```js
-ctx.state.active = ctx.protocol === 'responses' && ctx.provider.id === 'nuaa'
-  && ctx.provider.model === 'deepseek-flash';
+ctx.state.active = ctx.protocol === 'responses';
 ctx.state.completed = false;
 ctx.state.failed = false;
 ```
 
-三个条件缺一不可：**Responses 协议** + **provider `nuaa`** + **模型 `deepseek-flash`**。不在范围内，后续逻辑全部跳过。
+要修的毛病是 Responses 协议的产物，跟哪家供应商、哪个模型无关，所以判定只保留协议这一条。请求里没有 `ctx.provider` 也能正常工作。
 
 ### `onEvent(event, ctx)` —— 收到流事件时
 
@@ -87,24 +90,60 @@ magpie plugin list      # 应显示  gateway middleware  onProvider, onEvent
 
 改完文件需要让 magpie 重新加载插件。
 
-## 调整适用范围
+## 判定范围
 
-作用范围写死在 `onProvider` 第一行。三种常见改法：
+默认对**所有供应商、所有模型**生效，条件只有一条：请求走 Responses 协议。Chat Completions 等其它协议完全不经过它。
+
+要收窄的话，改 `onProvider` 第一行：
 
 ```js
-// 去掉模型限制，只认 provider
-ctx.state.active = ctx.protocol === 'responses' && ctx.provider.id === 'nuaa';
+// 只认某个供应商
+ctx.state.active = ctx.protocol === 'responses' && ctx.provider?.id === 'nuaa';
 
-// 所有 Responses 流量
-ctx.state.active = ctx.protocol === 'responses';
+// 再叠加某个模型
+ctx.state.active = ctx.protocol === 'responses'
+  && ctx.provider?.id === 'nuaa' && ctx.provider?.model === 'deepseek-flash';
 ```
 
 如果上游偶尔改用别的收尾报错，可以把规则 2 的 `code` 判断放宽——但**不要**把 `message` 判断完全去掉（见上文）。
 
-## 自测
+## 和 waf-shim.hooks.mjs 的关系
+
+两者是 magpie 的**两种不同插件**，处在不同阶段，互不影响：
+
+| | `waf-shim.hooks.mjs` | `nuaa-responses-fix.middleware.mjs`（本插件） |
+|---|---|---|
+| 类型 | async gateway hook | gateway middleware（进程内） |
+| 入口 | `onRequest` | `onProvider` / `onEvent` |
+| 时机 | 请求发出**前** | 响应流处理**时** |
+| 作用 | 改写字面量 + 插入提示 | 吞掉误报的收尾错误 |
+
+一个管**请求出去**，一个管**响应回来**；不共享状态，可以同时开启。
+
+## 离线自测
+
+不联网、不消耗额度：
 
 ```bash
 node nuaa-responses-fix.test.mjs
 ```
 
-39 项，覆盖：三个生效条件、`response.completed` 的五种不合法形态、精确匹配下吞掉收尾错误、错误码/消息不符时放行、未完成时放行、失败后不再采信 completion、每次请求重置状态，以及上面那条已知边界。
+输出 `FAILED 0` 即通过（当前 43 项）。覆盖：协议判定（含无 `ctx.provider`、未知供应商、非 Responses 协议）、`response.completed` 的五种不合法形态、精确匹配下吞掉收尾错误、错误码/消息不符时放行、未完成时放行、失败后不再采信 completion、每次请求重置状态，以及上面那条已知边界。
+
+## 排错
+
+| 现象 | 处理 |
+|---|---|
+| 该吞的没吞 | 先确认 `ctx.protocol` 真是 `responses`；不是就完全不生效。再看这一轮是否真的收到过合法的 `response.completed` |
+| 吞过头了（真错误也没了） | 有人放宽了规则 2 的条件；恢复成精确匹配 |
+| `plugin list` 里没有 | 路径写错，或用了双反斜杠 |
+| 有但显示 `off` | `magpie plugin on <路径>` |
+| 改了代码没效果 | 没重载；`list` 只反映注册状态，不反映文件内容 |
+
+## 文件清单
+
+| 文件 | 作用 |
+|---|---|
+| `nuaa-responses-fix.middleware.mjs` | 插件本体，magpie 唯一加载的文件 |
+| `nuaa-responses-fix.test.mjs` | 离线回归测试，改条件后跑 |
+| `README.md` | 本手册 |
