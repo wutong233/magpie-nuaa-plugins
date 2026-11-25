@@ -34,14 +34,24 @@ const start = (over) => {
   return ctx;
 };
 
-// --- scope: three conditions, all required -----------------------------
-ok('active when responses + nuaa + deepseek-flash', start().state.active === true);
+// --- scope: the Responses protocol, nothing else ------------------------
+ok('active for responses + nuaa + deepseek-flash', start().state.active === true);
+ok('active for another provider and model', start({ provider: { id: 'openai', model: 'gpt-5' } }).state.active === true);
+ok('active with no provider object', (() => {
+  const ctx = { protocol: 'responses', state: {} };
+  onProvider({}, ctx);
+  return ctx.state.active === true;
+})());
+ok('active with an unknown provider id', start({ provider: { id: 'local-llama', model: 'qwen3' } }).state.active === true);
 ok('inactive on chat protocol', start({ protocol: 'chat' }).state.active === false);
-ok('inactive on other provider', start({ provider: { id: 'openai', model: 'deepseek-flash' } }).state.active === false);
-ok('inactive on other model', start({ provider: { id: 'nuaa', model: 'gpt-5' } }).state.active === false);
+ok('inactive on completions protocol', start({ protocol: 'completions' }).state.active === false);
+ok('inactive without a protocol', (() => {
+  const ctx = { state: {} };
+  onProvider({}, ctx);
+  return ctx.state.active === false;
+})());
 ok('flags reset on start', (() => {
-  const ctx = mk();
-  ctx.state = { active: true, completed: true, failed: true };
+  const ctx = { protocol: 'responses', state: { active: true, completed: true, failed: true } };
   onProvider({}, ctx);
   return ctx.state.completed === false && ctx.state.failed === false;
 })());
@@ -70,6 +80,10 @@ const c2 = start();
 onEvent(COMPLETED, c2);
 ok('noise swallowed', onEvent(NOISE, c2) === null);
 ok('noise swallowed twice', onEvent(NOISE, c2) === null);
+
+const c2b = start({ provider: { id: 'openai', model: 'gpt-5' } });
+onEvent(COMPLETED, c2b);
+ok('noise swallowed for another provider too', onEvent(NOISE, c2b) === null);
 
 const c3 = start();
 onEvent(COMPLETED, c3);
