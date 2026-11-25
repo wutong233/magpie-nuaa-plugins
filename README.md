@@ -6,7 +6,7 @@
 
 ## waf-shim
 
-**问题**：上游的安全网关把 Python traceback 里的 `<module>` 判定为攻击特征，返回 HTTP 200 + `text/html` 的「访问禁止」页面。magpie 期待 JSON，拿到 HTML 就报 `answered 200 OK with a web page`。traceback 会留在对话历史里，因此一个会话只要出现过一次，之后每轮请求都会重发它，该会话持续报错。
+**解决了什么问题现象**：上游的安全网关把 Python traceback 里的 `<module>` 判定为攻击特征，返回 HTTP 200 + `text/html` 的「访问禁止」页面。magpie 期待 JSON，拿到 HTML 就报 `answered 200 OK with a web page`。traceback 会留在对话历史里，因此一个会话只要出现过一次，之后每轮请求都会重发它，该会话持续报错。
 
 **做法**：在请求发出前把匹配的文本替换成不会被拦的等价写法（`<module>` → `<module_>`），同时在会话里插入一条 system 说明，声明改了什么、原词是什么、改写是等价且无损的。
 
@@ -16,7 +16,7 @@
 
 ## nuaa-responses-fix
 
-**问题**：`response.completed` 已经正常到达，上游关闭连接后 magpie 又补了一条 `responses.incomplete_stream`（`Upstream stream ended without a terminal Responses event`），客户端于是把一次已成功的回答当成失败。
+**解决了什么问题现象**：`response.completed` 已经正常到达，上游关闭连接后 magpie 又补了一条 `responses.incomplete_stream`（`Upstream stream ended without a terminal Responses event`），客户端于是把一次已成功的回答当成失败。
 
 **做法**：在完整收到一条合法的 `response.completed` 之后，丢弃那条特定的错误事件。判定条件是 Responses 协议、provider `nuaa`、模型 `deepseek-flash`、`response.id` 非空且 `output` 为数组、本轮未出现其它失败事件。
 
